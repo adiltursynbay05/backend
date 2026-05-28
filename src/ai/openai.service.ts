@@ -214,37 +214,51 @@ export class OpenAiService {
       throw new Error('Text for OpenAI TTS is empty');
     }
 
-    const model = readEnvValue('OPENAI_TTS_MODEL') || 'gpt-4o-mini-tts';
+    const model = readEnvValue('OPENAI_TTS_MODEL') || 'tts-1';
     const voice = readEnvValue('OPENAI_TTS_VOICE') || 'alloy';
-    const response = await fetch('https://api.openai.com/v1/audio/speech', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.getOpenAiApiKey()}`,
-        Accept: 'audio/mpeg',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        input,
-        voice,
-        response_format: 'mp3',
-      }),
-    });
+    const timeoutMs = readPositiveIntegerEnv('OPENAI_TTS_TIMEOUT_MS', 12000);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      const errorMessage = this.readOpenAiErrorMessage(errorText);
-      console.error('OpenAI TTS Error:', {
-        status: response.status,
-        statusText: response.statusText,
-        message: errorMessage,
+    try {
+      const response = await fetch('https://api.openai.com/v1/audio/speech', {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          Authorization: `Bearer ${this.getOpenAiApiKey()}`,
+          Accept: 'audio/mpeg',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          input,
+          voice,
+          response_format: 'mp3',
+        }),
       });
-      throw new Error(
-        `OpenAI TTS failed (${response.status}): ${errorMessage}`,
-      );
-    }
 
-    return Buffer.from(await response.arrayBuffer());
+      if (!response.ok) {
+        const errorText = await response.text();
+        const errorMessage = this.readOpenAiErrorMessage(errorText);
+        console.error('OpenAI TTS Error:', {
+          status: response.status,
+          statusText: response.statusText,
+          message: errorMessage,
+        });
+        throw new Error(
+          `OpenAI TTS failed (${response.status}): ${errorMessage}`,
+        );
+      }
+
+      return Buffer.from(await response.arrayBuffer());
+    } catch (error: unknown) {
+      if (isAbortError(error)) {
+        throw new Error(`OpenAI TTS timed out after ${timeoutMs}ms`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
 
   private readOpenAiErrorMessage(errorText: string) {
@@ -421,4 +435,18 @@ function chunkEntries<T>(entries: T[], size: number): T[][] {
 
 function readEnvValue(key: string) {
   return (process.env[key] ?? '').trim().replace(/^['"]|['"]$/g, '');
+}
+
+function readPositiveIntegerEnv(key: string, fallback: number) {
+  const value = Number.parseInt(readEnvValue(key), 10);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function isAbortError(error: unknown) {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'name' in error &&
+    String((error as { name?: unknown }).name) === 'AbortError'
+  );
 }
